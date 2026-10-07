@@ -1,0 +1,16 @@
+.venv
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+output/*.png
+output/*.jpg
+tests/__pycache__/
+prelab/__pycache__/
+lab/__pycache__/
+.assets/
+.DS_Store
+*.mp4
+lab/output
+.pytest_cache/
