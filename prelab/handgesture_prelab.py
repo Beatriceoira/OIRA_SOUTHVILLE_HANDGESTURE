@@ -1,16 +1,3 @@
-"""
-handgesture_prelab.py
-Pre-Lab: MediaPipe Hand Gesture Controller for Media Playback & System Controls
-
-Gestures:
-    Thumb-Index Distance -> Volume Control
-    Open Palm            -> Play/Pause
-    Right Swipe          -> Next Track
-    Left Swipe           -> Previous Track
-    Closed Fist          -> Mute/Unmute
-    Two Fingers          -> Lock/Unlock
-"""
-
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -18,18 +5,35 @@ import math
 import time
 import subprocess
 import sys
+import ctypes
 from collections import deque
 
-CAMERA_INDEX = 0  # /dev/video0 is the actual camera device
+IS_WINDOWS = sys.platform == "win32"
+IS_LINUX = sys.platform.startswith("linux")
+
+if not (IS_WINDOWS or IS_LINUX):
+    print(f"Unsupported platform: {sys.platform}. This script supports Windows and Linux.")
+    sys.exit(1)
+
+PYCAW_AVAILABLE = False
+if IS_WINDOWS:
+    try:
+        from comtypes import CLSCTX_ALL
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        PYCAW_AVAILABLE = True
+    except Exception:
+        PYCAW_AVAILABLE = False
+
+CAMERA_INDEX = 0
 CONFIRMATION_TIME = 0.5
 COOLDOWN_TIME = 0.7
 SWIPE_MIN_DISTANCE = 60
 SWIPE_MIN_HORIZONTAL_RATIO = 1.2
 SWIPE_MAX_DURATION = 0.6
-SWIPE_MIN_VELOCITY = 80.0   # pixels per second
+SWIPE_MIN_VELOCITY = 80.0   
 MIN_DISTANCE = 0.02
 MAX_DISTANCE = 0.3
-OPEN_PALM_TOLERANCE = 0.02  # small tolerance for landmark jitter
+OPEN_PALM_TOLERANCE = 0.02 
 
 mp_hands = mp.solutions.hands
 hands = mp_hands.Hands(
@@ -39,27 +43,13 @@ hands = mp_hands.Hands(
     min_tracking_confidence=0.7
 )
 mp_draw = mp.solutions.drawing_utils
-
-# ============================================================================
-# LANDMARK MAP
-#   0  = Wrist
-#   4  = Thumb tip
-#   8  = Index fingertip
-#  12  = Middle fingertip
-#  16  = Ring fingertip
-#  20  = Pinky fingertip
-# ============================================================================
-
 class LinuxMediaController:
     """Handles Linux media control via playerctl, pactl, or wpctl."""
 
     def __init__(self):
         self.use_playerctl = self._check_playerctl()
-
         self.use_pactl = self._check_pactl()
-
         self.use_wpctl = self._check_wpctl()
-
         self.muted = False
 
         if not (self.use_playerctl or self.use_pactl or self.use_wpctl):
@@ -177,12 +167,7 @@ class LinuxMediaController:
     def mute(self):
         if self.use_pactl:
             result = subprocess.run(
-                [
-                    "pactl",
-                    "set-sink-mute",
-                    "@DEFAULT_SINK@",
-                    "toggle"
-                ],
+                ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"],
                 capture_output=True,
                 text=True,
                 timeout=2
@@ -196,12 +181,7 @@ class LinuxMediaController:
 
         if self.use_wpctl:
             result = subprocess.run(
-                [
-                    "wpctl",
-                    "set-mute",
-                    "@DEFAULT_AUDIO_SINK@",
-                    "toggle"
-                ],
+                ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"],
                 capture_output=True,
                 text=True,
                 timeout=2
@@ -221,12 +201,7 @@ class LinuxMediaController:
 
         if self.use_pactl:
             result = subprocess.run(
-                [
-                    "pactl",
-                    "set-sink-volume",
-                    "@DEFAULT_SINK@",
-                    f"{volume}%"
-                ],
+                ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{volume}%"],
                 capture_output=True,
                 text=True,
                 timeout=2
@@ -240,12 +215,7 @@ class LinuxMediaController:
 
         if self.use_wpctl:
             result = subprocess.run(
-                [
-                    "wpctl",
-                    "set-volume",
-                    "@DEFAULT_AUDIO_SINK@",
-                    f"{volume}%"
-                ],
+                ["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", f"{volume}%"],
                 capture_output=True,
                 text=True,
                 timeout=2
@@ -260,18 +230,135 @@ class LinuxMediaController:
         print("No system volume controller available.")
         return False
 
-media = LinuxMediaController()
+VK_VOLUME_MUTE = 0xAD
+VK_VOLUME_DOWN = 0xAE
+VK_VOLUME_UP = 0xAF
+VK_MEDIA_NEXT_TRACK = 0xB0
+VK_MEDIA_PREV_TRACK = 0xB1
+VK_MEDIA_PLAY_PAUSE = 0xB3
+
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+
+
+class WindowsMediaController:
+    """Handles Windows media control via media keys and pycaw."""
+
+    def __init__(self):
+        self.user32 = ctypes.windll.user32
+        self.endpoint = None
+        self.muted = False
+        self._last_volume = 50  
+
+        if PYCAW_AVAILABLE:
+            try:
+                devices = AudioUtilities.GetSpeakers()
+                if hasattr(devices, "EndpointVolume"):
+                    self.endpoint = devices.EndpointVolume
+                else:
+                    interface = devices.Activate(
+                        IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                    self.endpoint = ctypes.cast(
+                        interface, ctypes.POINTER(IAudioEndpointVolume))
+            except Exception as exc:
+                print(f"WARNING: pycaw audio init failed ({exc}). Using volume keys.")
+                self.endpoint = None
+        else:
+            print("WARNING: pycaw not installed (pip install pycaw comtypes). "
+                  "Volume/mute will use media keys (approximate).")
+
+    def _press_key(self, vk_code):
+        try:
+            self.user32.keybd_event(vk_code, 0, KEYEVENTF_EXTENDEDKEY, 0)
+            self.user32.keybd_event(vk_code, 0,
+                                    KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+            return True
+        except Exception as exc:
+            print(f"ERROR: key press failed: {exc}")
+            return False
+
+    def play_pause(self):
+        ok = self._press_key(VK_MEDIA_PLAY_PAUSE)
+        if ok:
+            print("MEDIA: Play/Pause key sent")
+        return ok
+
+    def next_track(self):
+        ok = self._press_key(VK_MEDIA_NEXT_TRACK)
+        if ok:
+            print("MEDIA: Next Track key sent")
+        return ok
+
+    def previous_track(self):
+        ok = self._press_key(VK_MEDIA_PREV_TRACK)
+        if ok:
+            print("MEDIA: Previous Track key sent")
+        return ok
+
+    def mute(self):
+        if self.endpoint is not None:
+            try:
+                current = bool(self.endpoint.GetMute())
+                self.endpoint.SetMute(0 if current else 1, None)
+                self.muted = not current
+                print(f"System {'muted' if self.muted else 'unmuted'}")
+                return True
+            except Exception as exc:
+                print(f"pycaw mute failed: {exc}")
+
+        if self._press_key(VK_VOLUME_MUTE):
+            self.muted = not self.muted
+            print("System mute toggled (key)")
+            return True
+
+        print("No system mute controller available.")
+        return False
+
+    def set_volume(self, volume):
+        volume = max(0, min(100, int(volume)))
+
+        if self.endpoint is not None:
+            try:
+                self.endpoint.SetMasterVolumeLevelScalar(volume / 100.0, None)
+                self._last_volume = volume
+                print(f"Volume set to {volume}%")
+                return True
+            except Exception as exc:
+                print(f"pycaw volume failed: {exc}")
+        diff = volume - self._last_volume
+        presses = int(round(abs(diff) / 2.0))
+        if presses > 0:
+            key = VK_VOLUME_UP if diff > 0 else VK_VOLUME_DOWN
+            for _ in range(presses):
+                self._press_key(key)
+            self._last_volume = volume
+            print(f"Volume ~{volume}% (key fallback)")
+            return True
+
+        return False
+
+
+def create_media_controller():
+    """Pick the media controller for the current OS."""
+    if IS_WINDOWS:
+        print("Platform: Windows")
+        return WindowsMediaController()
+    print("Platform: Linux")
+    return LinuxMediaController()
+
+
+media = create_media_controller()
 
 system_locked = False
 volume = 50
 action_history = deque(maxlen=30)
 last_action_time = 0.0
-# swipe_history stores (time.monotonic(), x, y) tuples
 swipe_history = deque(maxlen=20)
 confirm_start_time = None
 confirm_pending = None
-previous_static_gesture = "none"   # edge detection for static gestures
-gesture_latched = False            # prevents repeated toggle while pose held
+previous_static_gesture = "none"  
+gesture_latched = False          
+
 
 def calc_distance(p1, p2):
     """Euclidean distance between two landmarks."""
@@ -370,10 +457,11 @@ def trigger_action(action):
     action_history.append((ts, action))
     print(f"[{ts}] {action}")
 
+
 def recognize_gesture(landmarks, w, h):
     """Recognise a gesture. Returns (gesture_type, description, volume).
 
-    Recognition only — action execution is handled centrally in main().
+    Recognition only - action execution is handled centrally in main().
     Volume is calculated but NOT applied here so the locked state can be
     enforced consistently at the execution layer.
     """
@@ -385,14 +473,11 @@ def recognize_gesture(landmarks, w, h):
     normalized_dist = max(0.0, min(1.0, (dist - MIN_DISTANCE) / (MAX_DISTANCE - MIN_DISTANCE)))
     new_volume = int(normalized_dist * 100)
 
-    # Priority order: two-finger > swipe > open palm > closed fist > volume
     if is_two_finger(landmarks):
         return "two_finger", "Two Fingers", None
 
     swipe = detect_swipe(swipe_history)
     if swipe == "right":
-        # Consume the motion event so stale history cannot affect the next
-        # static gesture recognition cycle.
         swipe_history.clear()
         return "swipe_right", "Right Swipe", None
     if swipe == "left":
@@ -409,6 +494,7 @@ def recognize_gesture(landmarks, w, h):
         return "volume", f"Thumb-Index: {dist:.3f}, Vol: {new_volume}%", new_volume
 
     return "none", "Idle", None
+
 
 def render_dashboard(frame, gesture_type, gesture_desc, fps,
                      status_text, confirm_label, cooldown_remaining):
@@ -450,36 +536,41 @@ def render_dashboard(frame, gesture_type, gesture_desc, fps,
     cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, dash_y + 10),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-def initialize_camera():
-    """Initialize camera with robust fallback strategy.
 
-    Tries multiple candidates in order:
-    1. Device path /dev/video0 with default backend
-    2. Integer index 0 with CAP_V4L2 backend
-    3. Integer index 0 with CAP_ANY backend
-    """
-    candidates = [
-        ("/dev/video0", None),       # Device path with default backend
-        (CAMERA_INDEX, cv2.CAP_V4L2),  # Integer index with V4L2
-        (CAMERA_INDEX, cv2.CAP_ANY),   # Integer index with any backend
+def camera_candidates():
+    """Return (source, backend, label) camera candidates for this OS."""
+    if IS_WINDOWS:
+        return [
+            (CAMERA_INDEX, cv2.CAP_DSHOW, f"index {CAMERA_INDEX} (DSHOW)"),
+            (CAMERA_INDEX, cv2.CAP_MSMF, f"index {CAMERA_INDEX} (MSMF)"),
+            (CAMERA_INDEX, cv2.CAP_ANY, f"index {CAMERA_INDEX} (ANY)"),
+        ]
+    return [
+        ("/dev/video0", None, "/dev/video0"),
+        (CAMERA_INDEX, cv2.CAP_V4L2, f"index {CAMERA_INDEX} (V4L2)"),
+        (CAMERA_INDEX, cv2.CAP_ANY, f"index {CAMERA_INDEX} (ANY)"),
     ]
 
-    for name, backend in candidates:
+
+def initialize_camera():
+    """Initialize camera with a robust, OS-specific fallback strategy.
+
+    Windows: DirectShow -> Media Foundation -> any backend.
+    Linux:   /dev/video0 -> V4L2 index -> any backend.
+    """
+    candidates = camera_candidates()
+
+    for source, backend, desc in candidates:
         if backend is None:
-            cap = cv2.VideoCapture(name)
-            desc = f"{name}"
+            cap = cv2.VideoCapture(source)
         else:
-            cap = cv2.VideoCapture(name, backend)
-            desc = f"{name} ({'ANY' if backend == cv2.CAP_ANY else 'V4L2'})"
+            cap = cv2.VideoCapture(source, backend)
 
         if cap.isOpened():
-            # Configure known-working settings
             cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             cap.set(cv2.CAP_PROP_FPS, 30)
-
-            # Validate first frame
             ret, frame = cap.read()
             if ret and frame is not None:
                 print(f"Camera device: {desc}")
@@ -489,8 +580,13 @@ def initialize_camera():
             else:
                 cap.release()
                 print(f"Warning: {desc} opened but first frame failed")
+        else:
+            cap.release()
 
-    raise RuntimeError(f"Unable to open webcam. Tried: {[c[0] for c in candidates]}")
+    hint = ("Check Settings > Privacy & security > Camera and close other apps using the camera."
+            if IS_WINDOWS else
+            "Check that /dev/video0 exists and your user is in the 'video' group.")
+    raise RuntimeError(f"Unable to open webcam. Tried: {[c[2] for c in candidates]}. {hint}")
 
 
 def main():
@@ -532,6 +628,7 @@ def main():
             fps_counter = 0
             fps_time = now
 
+        now_mono = time.monotonic()
         results = hands.process(rgb)
         gesture_type = "none"
         gesture_desc = "No Hand"
@@ -547,15 +644,11 @@ def main():
             wrist = landmarks[0]
             wrist_x = w - wrist.x * w
             wrist_y = wrist.y * h
-            now_mono = time.monotonic()
-            # Prune stale motion history (older than SWIPE_MAX_DURATION)
             while swipe_history and now_mono - swipe_history[0][0] > SWIPE_MAX_DURATION:
                 swipe_history.popleft()
             swipe_history.append((now_mono, wrist_x, wrist_y))
 
             gesture_type, gesture_desc, new_volume = recognize_gesture(landmarks, w, h)
-
-            # ---- Two-finger Lock/Unlock (allowed while locked) ----
             if gesture_type == "two_finger":
                 if not gesture_latched:
                     if confirm_pending != ("unlock" if system_locked else "lock"):
@@ -574,13 +667,9 @@ def main():
                         confirm_start_time = None
                         gesture_latched = True
                         swipe_history.clear()
-                # While the two-finger pose is held, keep showing the
-                # confirmation progress bar so the user sees feedback.
                 if confirm_pending:
                     status_text = "CONFIRMING"
                     confirm_label = confirm_pending.upper()
-
-            # ---- Locked state enforcement: only two-finger is allowed ----
             elif system_locked:
                 if confirm_pending:
                     confirm_pending = None
@@ -589,10 +678,7 @@ def main():
                 gesture_desc = "LOCKED"
                 status_text = "LOCKED"
                 gesture_latched = False
-
-            # ---- Normal (unlocked) commands ----
             else:
-                # Open Palm -> Play/Pause with edge + confirmation debounce
                 if gesture_type == "open_palm":
                     if previous_static_gesture != "open_palm":
                         if not in_cooldown():
@@ -610,8 +696,6 @@ def main():
                         confirm_pending = None
                         confirm_start_time = None
                         gesture_latched = True
-
-                # Swipe -> Next/Previous Track
                 elif gesture_type in ("swipe_right", "swipe_left"):
                     if not in_cooldown():
                         direction = "next" if gesture_type == "swipe_right" else "prev"
@@ -630,28 +714,20 @@ def main():
 
                         swipe_history.clear()
                         gesture_latched = True
-
-                # Closed Fist -> Mute/Unmute
                 elif gesture_type == "fist":
                     if not in_cooldown():
                         media.mute()
                         trigger_action("Mute toggled")
                         gesture_latched = True
                         status_text = "DETECTED"
-
-                # Volume -> only when not in cooldown
                 elif gesture_type == "volume" and new_volume is not None:
                     if not in_cooldown():
                         volume = new_volume
                         media.set_volume(volume)
                         trigger_action(f"Volume -> {volume}%")
                         status_text = "DETECTED"
-
-                # Reset latch when the pose changes
                 if gesture_type != previous_static_gesture:
                     gesture_latched = False
-
-                # Edge detection for static gestures
                 if gesture_type in ("open_palm", "fist", "two_finger", "volume"):
                     if gesture_type != previous_static_gesture:
                         if gesture_type == "open_palm":
@@ -667,7 +743,6 @@ def main():
                     previous_static_gesture = "none"
 
         else:
-            # No hand detected — clear motion history and reset latch
             if swipe_history:
                 swipe_history.clear()
             if gesture_latched:
@@ -679,10 +754,9 @@ def main():
                 confirm_pending = None
                 confirm_start_time = None
 
-        # ---- Confirmation progress bar ----
         if confirm_pending and confirm_start_time is not None:
             elapsed = now_mono - confirm_start_time if results.multi_hand_landmarks else 0
-            bar_w = int((elapsed / CONFIRMATION_TIME) * 200)
+            bar_w = int(min(elapsed / CONFIRMATION_TIME, 1.0) * 200)
             bx, by = w // 2 - 100, 60
             cv2.rectangle(frame, (bx, by), (bx + 200, by + 12), (40, 40, 60), -1)
             cv2.rectangle(frame, (bx, by), (bx + bar_w, by + 12),
@@ -692,10 +766,7 @@ def main():
             cv2.putText(frame, f"Confirming: {label}", (bx, by - 5),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
-        # ---- Cooldown display ----
-        if not in_cooldown() and last_action_time > 0:
-            pass  # ready
-        elif last_action_time > 0:
+        if last_action_time > 0 and in_cooldown():
             cooldown_remaining = COOLDOWN_TIME - (time.monotonic() - last_action_time)
             if cooldown_remaining < 0:
                 cooldown_remaining = 0.0
