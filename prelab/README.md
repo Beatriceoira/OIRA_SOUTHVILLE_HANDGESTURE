@@ -304,8 +304,10 @@ Done since the first version: Redo, gesture-controlled brush size, window resize
 ```
 OIRA_SOUTHVILLE_HANDGESTURE/
 ├── prelab/
+│   └── screenshots/
 │   └── handgesture_prelab.py
 ├── lab/
+│   └── screenshots/
 │   └── handgesture_lab.py
 ├── surprise_modification/
 ├── output/
@@ -313,6 +315,7 @@ OIRA_SOUTHVILLE_HANDGESTURE/
 │   └── test_gestures.py
 │   └── test_prelab.py
 ├── docs/
+│   └── HandGesture Studio - Advanced OpenCV Laboratory Report
 │   └── HandGesture Studio - Code Reference.docx
 │   └── lab 1.pdf
 ├── requirements.txt
